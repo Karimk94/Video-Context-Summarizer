@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Context Summarizer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            border-left-color: #3b82f6;
+            animation: spin 1s ease infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .drag-over {
+            border-color: #3b82f6;
+            background-color: rgba(59, 130, 246, 0.1);
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 flex items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-2xl mx-auto">
+        <!-- Header -->
+        <div class="text-center mb-8">
+            <h1 class="text-3xl md:text-4xl font-bold text-white">Video Context Summarizer</h1>
+            <p class="text-gray-400 mt-2">Get a quick summary of any video's content using AI.</p>
+        </div>
+
+        <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl shadow-blue-900/20">
+            <div class="p-6 md:p-8 space-y-6">
+                <!-- Step 1: Upload Area -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-2">1. Drop your video here</label>
+                    <div id="drop-zone" class="relative flex flex-col items-center justify-center w-full h-48 border-2 border-gray-600 border-dashed rounded-lg cursor-pointer bg-gray-800 hover:bg-gray-700 transition-colors">
+                        <div id="drop-zone-text" class="flex flex-col items-center justify-center pt-5 pb-6 text-center">
+                            <svg class="w-8 h-8 mb-4 text-gray-500" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 16"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 13h3a3 3 0 0 0 0-6h-.025A5.56 5.56 0 0 0 16 6.5 5.5 5.5 0 0 0 5.207 5.021C5.137 5.017 5.071 5 5 5a4 4 0 0 0 0 8h2.167M10 15V6m0 0L8 8m2-2 2 2"/></svg>
+                            <p class="mb-2 text-sm text-gray-400"><span class="font-semibold">Click to upload</span> or drag and drop</p>
+                            <p class="text-xs text-gray-500">MP4, MOV, AVI, MKV</p>
+                        </div>
+                        <div id="file-info" class="hidden items-center space-x-3 text-center">
+                             <svg class="w-10 h-10 text-green-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75l3 3m0 0l3-3m-3 3v-7.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                            <div>
+                                <p class="font-semibold text-white" id="file-name"></p>
+                                <p class="text-xs text-gray-500" id="file-size"></p>
+                            </div>
+                        </div>
+                        <input id="video-upload" type="file" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" accept="video/*"/>
+                    </div>
+                </div>
+
+                <!-- Step 2: Language -->
+                <div>
+                    <label for="language-select" class="block text-sm font-medium text-gray-300 mb-2">2. Select Language</label>
+                    <select id="language-select" class="w-full bg-gray-700 border border-gray-600 text-white text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-2.5">
+                        <option value="english" selected>English</option>
+                        <option value="arabic">Arabic</option>
+                    </select>
+                </div>
+
+                <!-- Step 3: Generate Button -->
+                <button id="upload-button" class="w-full flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>
+                    <span id="button-text">Generate Summary</span>
+                    <div id="button-spinner" class="spinner hidden ml-3"></div>
+                </button>
+            </div>
+
+            <!-- Status & Results Area -->
+            <div id="status-container" class="p-6 md:p-8 border-t border-gray-700 hidden">
+                <p id="status-text" class="text-center font-medium text-blue-400"></p>
+            </div>
+
+            <div id="results-container" class="p-6 md:p-8 border-t border-gray-700 hidden">
+                <!-- Results will be populated here -->
+            </div>
+        </div>
+    </div>
+
+<script>
+    const dropZone = document.getElementById('drop-zone');
+    const dropZoneText = document.getElementById('drop-zone-text');
+    const fileInfo = document.getElementById('file-info');
+    const fileNameDisplay = document.getElementById('file-name');
+    const fileSizeDisplay = document.getElementById('file-size');
+    const videoUpload = document.getElementById('video-upload');
+    const languageSelect = document.getElementById('language-select');
+    const uploadButton = document.getElementById('upload-button');
+    const buttonText = document.getElementById('button-text');
+    const buttonSpinner = document.getElementById('button-spinner');
+    const statusContainer = document.getElementById('status-container');
+    const statusText = document.getElementById('status-text');
+    const resultsContainer = document.getElementById('results-container');
+    
+    let selectedFile = null;
+    let pollingInterval = null;
+
+    function handleFileSelect(file) {
+        if (file && file.type.startsWith('video/')) {
+            selectedFile = file;
+            fileNameDisplay.textContent = selectedFile.name;
+            fileSizeDisplay.textContent = `${(selectedFile.size / 1024 / 1024).toFixed(2)} MB`;
+            uploadButton.disabled = false;
+            dropZoneText.classList.add('hidden');
+            fileInfo.classList.remove('hidden');
+            fileInfo.classList.add('flex');
+        } else {
+            alert('Please select a valid video file.');
+        }
+    }
+
+    // Drag and Drop events
+    dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropZone.classList.add('drag-over');
+    });
+    dropZone.addEventListener('dragleave', () => {
+        dropZone.classList.remove('drag-over');
+    });
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+        const file = e.dataTransfer.files[0];
+        handleFileSelect(file);
+    });
+    videoUpload.addEventListener('change', (e) => handleFileSelect(e.target.files[0]));
+
+    uploadButton.addEventListener('click', async () => {
+        if (!selectedFile) return;
+
+        // Reset and prepare UI for processing
+        setControlsDisabled(true);
+        buttonText.textContent = 'Processing...';
+        buttonSpinner.classList.remove('hidden');
+        resultsContainer.innerHTML = '';
+        resultsContainer.classList.add('hidden');
+        statusContainer.classList.remove('hidden');
+        statusText.textContent = 'Uploading video (this may take a moment)...';
+
+        const formData = new FormData();
+        formData.append('video', selectedFile);
+        formData.append('language', languageSelect.value);
+
+        try {
+            const response = await fetch('/upload', { method: 'POST', body: formData });
+            if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
+            
+            const data = await response.json();
+            if (data.task_id) {
+                pollForStatus(data.task_id);
+            } else {
+                handleError(data.error || 'Failed to start task.');
+            }
+        } catch (error) {
+            handleError('Could not connect to the server.');
+        }
+    });
+
+    function pollForStatus(taskId) {
+        pollingInterval = setInterval(async () => {
+            try {
+                const response = await fetch(`/status/${taskId}`);
+                const data = await response.json();
+
+                if (data.status === 'complete') {
+                    clearInterval(pollingInterval);
+                    displayResults(data.result);
+                } else if (data.status === 'error') {
+                    clearInterval(pollingInterval);
+                    handleError(data.error);
+                } else {
+                    statusText.textContent = data.status;
+                }
+            } catch (error) {
+                clearInterval(pollingInterval);
+                handleError('Lost connection during processing.');
+            }
+        }, 3000);
+    }
+
+    function displayResults(result) {
+        statusContainer.classList.add('hidden');
+        resultsContainer.classList.remove('hidden');
+
+        let html = `<h2 class="text-xl font-bold text-white text-center mb-6">Context Summary</h2><div class="space-y-6">`;
+
+        // Objects Card
+        html += createResultCard(
+            'Visually Detected Objects',
+            '<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>',
+            result.objects.length > 0
+                ? `<div class="flex flex-wrap gap-2">${result.objects.map(obj => `<span class="bg-gray-600 text-gray-200 text-xs font-medium px-2.5 py-1 rounded-full">${obj}</span>`).join('')}</div>`
+                : '<p class="text-gray-400 text-sm">None found.</p>'
+        );
+
+        // Faces Card
+        html += createResultCard(
+            'Unique Faces Detected',
+            '<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" /></svg>',
+            `<p class="text-3xl font-bold text-white">${result.faces}</p>`
+        );
+
+        // Snippets Card
+        html += createResultCard(
+            'Transcription Snippets',
+            '<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>',
+            result.snippets.length > 0
+                ? `<ul class="space-y-3">${result.snippets.map(snip => `<li class="border-l-2 border-blue-500 pl-3 text-sm text-gray-300">${snip}</li>`).join('')}</ul>`
+                : '<p class="text-gray-400 text-sm">No speech detected in samples.</p>'
+        );
+
+        html += '</div>'; // Close space-y-6
+        resultsContainer.innerHTML = html;
+        setControlsDisabled(false);
+    }
+    
+    function createResultCard(title, icon, content) {
+        return `
+            <div class="bg-gray-700/50 p-4 rounded-lg">
+                <div class="flex items-center space-x-3 mb-3 text-gray-400">
+                    ${icon}
+                    <h3 class="text-base font-semibold text-gray-300">${title}</h3>
+                </div>
+                <div>${content}</div>
+            </div>`;
+    }
+
+    function handleError(message) {
+        clearInterval(pollingInterval);
+        statusContainer.classList.remove('hidden');
+        statusText.textContent = `Error: ${message}`;
+        statusText.classList.remove('text-blue-400');
+        statusText.classList.add('text-red-400');
+        setControlsDisabled(false);
+    }
+
+    function setControlsDisabled(disabled) {
+        uploadButton.disabled = disabled;
+        videoUpload.disabled = disabled;
+        if (!disabled) {
+            buttonText.textContent = 'Generate Summary';
+            buttonSpinner.classList.add('hidden');
+        }
+    }
+</script>
+</body>
+</html>

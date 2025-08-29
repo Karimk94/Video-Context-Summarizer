@@ -1,0 +1,24 @@
+# Core build tool
+setuptools
+
+# Web server
+Flask
+
+# Core functionality
+openai-whisper
+
+# For visual analysis (Strategic Sampling)
+opencv-python-headless
+ultralytics
+deepface
+tf-keras
+
+# Pinned moviepy for compatibility, other versions are flexible
+moviepy==1.0.3
+numpy
+imageio
+Pillow
+
+# torch and torchvision are dependencies for ultralytics (YOLO)
+torch
+torchvision
