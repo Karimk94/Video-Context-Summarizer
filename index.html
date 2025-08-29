@@ -18,20 +18,13 @@
             border-left-color: #3b82f6;
             animation: spin 1s ease infinite;
         }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        .drag-over {
-            border-color: #3b82f6;
-            background-color: rgba(59, 130, 246, 0.1);
-        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .drag-over { border-color: #3b82f6; background-color: rgba(59, 130, 246, 0.1); }
     </style>
 </head>
 <body class="bg-gray-900 text-gray-200 flex items-center justify-center min-h-screen p-4">
 
     <div class="w-full max-w-2xl mx-auto">
-        <!-- Header -->
         <div class="text-center mb-8">
             <h1 class="text-3xl md:text-4xl font-bold text-white">Video Context Summarizer</h1>
             <p class="text-gray-400 mt-2">Get a quick summary of any video's content using AI.</p>
@@ -39,7 +32,6 @@
 
         <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl shadow-blue-900/20">
             <div class="p-6 md:p-8 space-y-6">
-                <!-- Step 1: Upload Area -->
                 <div>
                     <label class="block text-sm font-medium text-gray-300 mb-2">1. Drop your video here</label>
                     <div id="drop-zone" class="relative flex flex-col items-center justify-center w-full h-48 border-2 border-gray-600 border-dashed rounded-lg cursor-pointer bg-gray-800 hover:bg-gray-700 transition-colors">
@@ -59,7 +51,6 @@
                     </div>
                 </div>
 
-                <!-- Step 2: Language -->
                 <div>
                     <label for="language-select" class="block text-sm font-medium text-gray-300 mb-2">2. Select Language</label>
                     <select id="language-select" class="w-full bg-gray-700 border border-gray-600 text-white text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-2.5">
@@ -68,21 +59,15 @@
                     </select>
                 </div>
 
-                <!-- Step 3: Generate Button -->
                 <button id="upload-button" class="w-full flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>
                     <span id="button-text">Generate Summary</span>
                     <div id="button-spinner" class="spinner hidden ml-3"></div>
                 </button>
             </div>
-
-            <!-- Status & Results Area -->
             <div id="status-container" class="p-6 md:p-8 border-t border-gray-700 hidden">
                 <p id="status-text" class="text-center font-medium text-blue-400"></p>
             </div>
-
-            <div id="results-container" class="p-6 md:p-8 border-t border-gray-700 hidden">
-                <!-- Results will be populated here -->
-            </div>
+            <div id="results-container" class="p-6 md:p-8 border-t border-gray-700 hidden"></div>
         </div>
     </div>
 
@@ -103,6 +88,7 @@
     
     let selectedFile = null;
     let pollingInterval = null;
+    const FACE_RECOG_URL = 'http://127.0.0.1:5002';
 
     function handleFileSelect(file) {
         if (file && file.type.startsWith('video/')) {
@@ -118,42 +104,26 @@
         }
     }
 
-    // Drag and Drop events
-    dropZone.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        dropZone.classList.add('drag-over');
-    });
-    dropZone.addEventListener('dragleave', () => {
-        dropZone.classList.remove('drag-over');
-    });
-    dropZone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dropZone.classList.remove('drag-over');
-        const file = e.dataTransfer.files[0];
-        handleFileSelect(file);
-    });
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+    dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('drag-over'); });
+    dropZone.addEventListener('drop', (e) => { e.preventDefault(); dropZone.classList.remove('drag-over'); handleFileSelect(e.dataTransfer.files[0]); });
     videoUpload.addEventListener('change', (e) => handleFileSelect(e.target.files[0]));
 
     uploadButton.addEventListener('click', async () => {
         if (!selectedFile) return;
-
-        // Reset and prepare UI for processing
         setControlsDisabled(true);
         buttonText.textContent = 'Processing...';
         buttonSpinner.classList.remove('hidden');
         resultsContainer.innerHTML = '';
         resultsContainer.classList.add('hidden');
         statusContainer.classList.remove('hidden');
-        statusText.textContent = 'Uploading video (this may take a moment)...';
-
+        statusText.textContent = 'Uploading video...';
         const formData = new FormData();
         formData.append('video', selectedFile);
         formData.append('language', languageSelect.value);
-
         try {
             const response = await fetch('/upload', { method: 'POST', body: formData });
             if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
-            
             const data = await response.json();
             if (data.task_id) {
                 pollForStatus(data.task_id);
@@ -169,8 +139,8 @@
         pollingInterval = setInterval(async () => {
             try {
                 const response = await fetch(`/status/${taskId}`);
+                if (!response.ok) throw new Error('Status check failed');
                 const data = await response.json();
-
                 if (data.status === 'complete') {
                     clearInterval(pollingInterval);
                     displayResults(data.result);
@@ -190,48 +160,117 @@
     function displayResults(result) {
         statusContainer.classList.add('hidden');
         resultsContainer.classList.remove('hidden');
-
         let html = `<h2 class="text-xl font-bold text-white text-center mb-6">Context Summary</h2><div class="space-y-6">`;
-
-        // Objects Card
-        html += createResultCard(
-            'Visually Detected Objects',
-            '<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>',
-            result.objects.length > 0
-                ? `<div class="flex flex-wrap gap-2">${result.objects.map(obj => `<span class="bg-gray-600 text-gray-200 text-xs font-medium px-2.5 py-1 rounded-full">${obj}</span>`).join('')}</div>`
-                : '<p class="text-gray-400 text-sm">None found.</p>'
-        );
-
-        // Faces Card
-        html += createResultCard(
-            'Unique Faces Detected',
-            '<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" /></svg>',
-            `<p class="text-3xl font-bold text-white">${result.faces}</p>`
-        );
-
-        // Snippets Card
-        html += createResultCard(
-            'Transcription Snippets',
-            '<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>',
-            result.snippets.length > 0
-                ? `<ul class="space-y-3">${result.snippets.map(snip => `<li class="border-l-2 border-blue-500 pl-3 text-sm text-gray-300">${snip}</li>`).join('')}</ul>`
-                : '<p class="text-gray-400 text-sm">No speech detected in samples.</p>'
-        );
-
-        html += '</div>'; // Close space-y-6
+        html += createResultCard('Visually Detected Objects', result.objects.length > 0 ? `<div class="flex flex-wrap gap-2">${result.objects.map(obj => `<span class="bg-gray-600 text-gray-200 text-xs font-medium px-2.5 py-1 rounded-full">${obj}</span>`).join('')}</div>` : '<p class="text-gray-400 text-sm">None found.</p>');
+        let facesContent = '<p class="text-gray-400 text-sm">No unique faces detected.</p>';
+        if (result.faces && result.faces.length > 0) {
+            facesContent = `<div id="face-gallery" class="grid grid-cols-3 md:grid-cols-5 gap-4">
+                ${result.faces.map((faceB64, index) => `
+                <div class="flex flex-col items-center text-center">
+                    <img src="data:image/jpeg;base64,${faceB64}" alt="Face ${index + 1}" class="w-24 h-24 rounded-lg object-cover border-2 border-gray-600">
+                    <div id="face-controls-${index}" class="w-full mt-2"></div>
+                </div>`).join('')}
+            </div>
+            <button id="analyze-faces-button" class="mt-4 w-full flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition">Recognize Faces</button>
+            <div id="face-analysis-spinner" class="spinner mx-auto mt-4 hidden"></div>`;
+        }
+        html += createResultCard('Unique Faces Detected', facesContent);
+        html += createResultCard('Transcription Snippets', result.snippets.length > 0 ? `<ul class="space-y-3">${result.snippets.map(snip => `<li class="border-l-2 border-blue-500 pl-3 text-sm text-gray-300">${snip}</li>`).join('')}</ul>` : '<p class="text-gray-400 text-sm">No speech detected.</p>');
+        html += '</div>';
         resultsContainer.innerHTML = html;
         setControlsDisabled(false);
+        if (result.faces && result.faces.length > 0) {
+            document.getElementById('analyze-faces-button').addEventListener('click', () => analyzeFaces(result.faces));
+        }
     }
     
-    function createResultCard(title, icon, content) {
-        return `
-            <div class="bg-gray-700/50 p-4 rounded-lg">
-                <div class="flex items-center space-x-3 mb-3 text-gray-400">
-                    ${icon}
-                    <h3 class="text-base font-semibold text-gray-300">${title}</h3>
-                </div>
-                <div>${content}</div>
-            </div>`;
+    async function analyzeFaces(facesB64) {
+        const analyzeButton = document.getElementById('analyze-faces-button');
+        const spinner = document.getElementById('face-analysis-spinner');
+        analyzeButton.classList.add('hidden');
+        spinner.classList.remove('hidden');
+
+        try {
+            // *** CHANGE: Send a JSON array of base64 strings instead of a composite image ***
+            const response = await fetch(`${FACE_RECOG_URL}/recognize_faces`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ faces: facesB64 }) 
+            });
+
+            if (!response.ok) throw new Error('Face analysis service failed.');
+            const analysisResult = await response.json();
+            if (!analysisResult.faces) throw new Error('Invalid response from server.');
+
+            analysisResult.faces.forEach(face => {
+                const index = face.index - 1;
+                const controlsContainer = document.getElementById(`face-controls-${index}`);
+                if (!controlsContainer) return;
+                let displayName = face.name.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase());
+                if (displayName.toLowerCase() === 'unknown') displayName = '';
+                controlsContainer.innerHTML = `
+                    <input type="text" id="face-name-${index}" class="w-full bg-gray-800 border border-gray-600 text-white text-xs rounded-md p-1 text-center" placeholder="Enter Name" value="${displayName}">
+                    <button class="save-face-button mt-1 w-full text-xs bg-green-600 hover:bg-green-700 text-white font-semibold py-1 px-2 rounded-md" data-index="${index}">Save</button>
+                `;
+            });
+            
+            document.querySelectorAll('.save-face-button').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const index = e.target.getAttribute('data-index');
+                    saveFace(index, facesB64[index]);
+                });
+            });
+        } catch (error) {
+            alert(`Error analyzing faces: ${error.message}`);
+            analyzeButton.classList.remove('hidden');
+        } finally {
+            spinner.classList.add('hidden');
+        }
+    }
+
+    async function saveFace(index, faceB64) {
+        const nameInput = document.getElementById(`face-name-${index}`);
+        const personName = nameInput.value.trim();
+        if (!personName) {
+            alert('Please enter a name for the face.');
+            return;
+        }
+        const saveButton = document.querySelector(`button[data-index="${index}"]`);
+        saveButton.textContent = 'Saving...';
+        saveButton.disabled = true;
+        nameInput.disabled = true;
+        try {
+            // Use the /add_person endpoint from your other project
+            const addPersonFormData = new FormData();
+            addPersonFormData.append('person_name', personName);
+            addPersonFormData.append('image_data', faceB64);
+            const addResponse = await fetch(`${FACE_RECOG_URL}/add_person`, {
+                 method: 'POST',
+                 body: addPersonFormData
+            });
+            const result = await addResponse.json();
+            if (addResponse.ok && result.status === 'success') {
+                saveButton.textContent = 'Saved';
+                saveButton.classList.remove('bg-green-600', 'hover:bg-green-700');
+                saveButton.classList.add('bg-gray-500');
+            } else {
+                throw new Error(result.message || 'Failed to save the face.');
+            }
+        } catch (error) {
+            alert(`Error saving face: ${error.message}`);
+            saveButton.textContent = 'Save';
+            saveButton.disabled = false;
+            nameInput.disabled = false;
+        }
+    }
+    
+    function createResultCard(title, content) {
+        const icons = {
+            'Visually Detected Objects': `<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>`,
+            'Unique Faces Detected': `<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" /></svg>`,
+            'Transcription Snippets': `<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>`
+        };
+        return `<div class="bg-gray-700/50 p-4 rounded-lg"><div class="flex items-center space-x-3 mb-3 text-gray-400">${icons[title] || ''}<h3 class="text-base font-semibold text-gray-300">${title}</h3></div><div>${content}</div></div>`;
     }
 
     function handleError(message) {

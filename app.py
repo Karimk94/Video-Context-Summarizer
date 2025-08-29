@@ -9,6 +9,9 @@ from ultralytics import YOLO
 from deepface import DeepFace
 import numpy as np
 import logging
+import base64
+import io
+from PIL import Image
 
 # --- Basic Setup ---
 app = Flask(__name__)
@@ -63,28 +66,53 @@ def extract_keyframes(video_path: str, task_id: str):
         tasks[task_id]['error'] = f"Keyframe extraction failed: {e}"
         return []
 
-def analyze_frames_for_context(frames: list, task_id: str) -> (set, int):
-    """Analyzes frames and updates task status."""
+def analyze_frames_for_context(frames: list, task_id: str) -> (set, list):
+    """Analyzes frames for objects and extracts unique faces."""
     tasks[task_id]['status'] = 'Analyzing keyframes for objects and faces...'
-    detected_objects, known_face_embeddings = set(), []
+    detected_objects, known_face_embeddings, unique_faces = set(), [], []
+    
     for i, frame in enumerate(frames):
-        tasks[task_id]['status'] = f'Analyzing keyframe {i+1}/{len(frames)}...'
+        tasks[task_id]['status'] = f'Analyzing keyframe {i+1}/{len(frames)} for objects...'
         # Object Detection
         results = YOLO_MODEL(frame, verbose=False)
         for result in results:
             for box in result.boxes:
                 detected_objects.add(YOLO_MODEL.names[int(box.cls)])
-        # Face Detection
+
+    tasks[task_id]['status'] = 'Detecting and extracting unique faces...'
+    for i, frame in enumerate(frames):
         try:
+            # Use extract_faces to get face images and embeddings
             embedding_objs = DeepFace.represent(frame, model_name='VGG-Face', detector_backend='opencv', enforce_detection=False)
+            
             for emb_obj in embedding_objs:
                 if 'embedding' not in emb_obj: continue
                 embedding = emb_obj['embedding']
+                
+                # Check if the face is unique
                 is_new = all(np.linalg.norm(np.array(known) - np.array(embedding)) > 0.6 for known in known_face_embeddings)
-                if is_new: known_face_embeddings.append(embedding)
+                
+                if is_new:
+                    known_face_embeddings.append(embedding)
+                    
+                    # Get the face image
+                    facial_area = emb_obj['facial_area']
+                    x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
+                    face_image = frame[y:y+h, x:x+w]
+                    
+                    # Convert to base64
+                    pil_img = Image.fromarray(face_image)
+                    buff = io.BytesIO()
+                    pil_img.save(buff, format="JPEG")
+                    img_str = base64.b64encode(buff.getvalue()).decode("utf-8")
+                    
+                    unique_faces.append(img_str)
+
         except Exception:
             pass # Skip frame if face analysis fails
-    return detected_objects, len(known_face_embeddings)
+            
+    return detected_objects, unique_faces
+
 
 def transcribe_audio_chunks(video_path: str, language: str, task_id: str) -> list:
     """Transcribes audio chunks and updates task status with better logging."""
@@ -133,7 +161,7 @@ def process_video_task(video_path: str, language: str, task_id: str):
     try:
         # Step 1: Visual Analysis
         keyframes = extract_keyframes(video_path, task_id)
-        detected_objects, unique_faces_count = analyze_frames_for_context(keyframes, task_id) if keyframes else (set(), 0)
+        detected_objects, unique_faces = analyze_frames_for_context(keyframes, task_id) if keyframes else (set(), [])
         
         # Step 2: Audio Analysis
         transcribed_snippets = transcribe_audio_chunks(video_path, language, task_id)
@@ -142,7 +170,7 @@ def process_video_task(video_path: str, language: str, task_id: str):
         tasks[task_id]['status'] = 'complete'
         tasks[task_id]['result'] = {
             "objects": sorted(list(detected_objects)),
-            "faces": unique_faces_count,
+            "faces": unique_faces,
             "snippets": transcribed_snippets
         }
     except Exception as e:
