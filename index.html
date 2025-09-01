@@ -20,11 +20,16 @@
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         .drag-over { border-color: #3b82f6; background-color: rgba(59, 130, 246, 0.1); }
+        .keyword-tag { display: inline-flex; align-items: center; background-color: #4b5563; color: #e5e7eb; padding: 4px 10px; border-radius: 9999px; font-size: 0.875rem; line-height: 1.25rem; }
+        .add-keyword-btn { margin-left: 8px; background: #6b7280; border-radius: 50%; width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; color: white; cursor: pointer; border: none; font-weight: bold; }
+        .add-keyword-btn:hover { background: #4f46e5; }
+        .add-keyword-btn.added { background: #16a34a; color: white; cursor: default; }
     </style>
 </head>
 <body class="bg-gray-900 text-gray-200 flex items-center justify-center min-h-screen p-4">
 
     <div class="w-full max-w-2xl mx-auto">
+        <!-- Header -->
         <div class="text-center mb-8">
             <h1 class="text-3xl md:text-4xl font-bold text-white">Video Context Summarizer</h1>
             <p class="text-gray-400 mt-2">Get a quick summary of any video's content using AI.</p>
@@ -32,13 +37,13 @@
 
         <div class="bg-gray-800 border border-gray-700 rounded-2xl shadow-2xl shadow-blue-900/20">
             <div class="p-6 md:p-8 space-y-6">
+                <!-- Upload, Language, Button sections -->
                 <div>
                     <label class="block text-sm font-medium text-gray-300 mb-2">1. Drop your video here</label>
                     <div id="drop-zone" class="relative flex flex-col items-center justify-center w-full h-48 border-2 border-gray-600 border-dashed rounded-lg cursor-pointer bg-gray-800 hover:bg-gray-700 transition-colors">
                         <div id="drop-zone-text" class="flex flex-col items-center justify-center pt-5 pb-6 text-center">
                             <svg class="w-8 h-8 mb-4 text-gray-500" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 16"><path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 13h3a3 3 0 0 0 0-6h-.025A5.56 5.56 0 0 0 16 6.5 5.5 5.5 0 0 0 5.207 5.021C5.137 5.017 5.071 5 5 5a4 4 0 0 0 0 8h2.167M10 15V6m0 0L8 8m2-2 2 2"/></svg>
                             <p class="mb-2 text-sm text-gray-400"><span class="font-semibold">Click to upload</span> or drag and drop</p>
-                            <p class="text-xs text-gray-500">MP4, MOV, AVI, MKV</p>
                         </div>
                         <div id="file-info" class="hidden items-center space-x-3 text-center">
                              <svg class="w-10 h-10 text-green-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75l3 3m0 0l3-3m-3 3v-7.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
@@ -50,7 +55,6 @@
                         <input id="video-upload" type="file" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" accept="video/*"/>
                     </div>
                 </div>
-
                 <div>
                     <label for="language-select" class="block text-sm font-medium text-gray-300 mb-2">2. Select Language</label>
                     <select id="language-select" class="w-full bg-gray-700 border border-gray-600 text-white text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 p-2.5">
@@ -58,8 +62,7 @@
                         <option value="arabic">Arabic</option>
                     </select>
                 </div>
-
-                <button id="upload-button" class="w-full flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>
+                <button id="upload-button" class="w-full flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-300 disabled:bg-gray-600" disabled>
                     <span id="button-text">Generate Summary</span>
                     <div id="button-spinner" class="spinner hidden ml-3"></div>
                 </button>
@@ -89,6 +92,7 @@
     let selectedFile = null;
     let pollingInterval = null;
     const FACE_RECOG_URL = 'http://127.0.0.1:5002';
+    const REPHRASER_URL = 'http://127.0.0.1:5005';
 
     function handleFileSelect(file) {
         if (file && file.type.startsWith('video/')) {
@@ -161,7 +165,10 @@
         statusContainer.classList.add('hidden');
         resultsContainer.classList.remove('hidden');
         let html = `<h2 class="text-xl font-bold text-white text-center mb-6">Context Summary</h2><div class="space-y-6">`;
+        
+        html += createResultCard('Final Keywords', `<div id="final-keywords-container" class="flex flex-wrap gap-2"></div>`);
         html += createResultCard('Visually Detected Objects', result.objects.length > 0 ? `<div class="flex flex-wrap gap-2">${result.objects.map(obj => `<span class="bg-gray-600 text-gray-200 text-xs font-medium px-2.5 py-1 rounded-full">${obj}</span>`).join('')}</div>` : '<p class="text-gray-400 text-sm">None found.</p>');
+        
         let facesContent = '<p class="text-gray-400 text-sm">No unique faces detected.</p>';
         if (result.faces && result.faces.length > 0) {
             facesContent = `<div id="face-gallery" class="grid grid-cols-3 md:grid-cols-5 gap-4">
@@ -175,33 +182,150 @@
             <div id="face-analysis-spinner" class="spinner mx-auto mt-4 hidden"></div>`;
         }
         html += createResultCard('Unique Faces Detected', facesContent);
-        html += createResultCard('Transcription Snippets', result.snippets.length > 0 ? `<ul class="space-y-3">${result.snippets.map(snip => `<li class="border-l-2 border-blue-500 pl-3 text-sm text-gray-300">${snip}</li>`).join('')}</ul>` : '<p class="text-gray-400 text-sm">No speech detected.</p>');
+
+        let transcriptContent = '<p class="text-gray-400 text-sm">No speech detected in the video.</p>';
+        if (result.transcript && result.transcript.trim().length > 0) {
+            transcriptContent = `
+                <p id="transcript-text" class="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">${result.transcript}</p>
+                <button id="tokenize-button" class="mt-4 w-full flex items-center justify-center bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg transition">Tokenize Transcript</button>
+                <div id="tokenize-spinner" class="spinner mx-auto mt-4 hidden"></div>
+            `;
+        }
+        html += createResultCard('Full Transcript', transcriptContent);
+
+        html += `<div id="suggested-keywords-card" class="hidden">
+                    ${createResultCard('Suggested Keywords from Transcript', '<div id="suggested-keywords-container" class="flex flex-wrap gap-2"></div>')}
+                 </div>`;
+
         html += '</div>';
         resultsContainer.innerHTML = html;
         setControlsDisabled(false);
+
+        populateInitialKeywords(result.objects);
+        
         if (result.faces && result.faces.length > 0) {
             document.getElementById('analyze-faces-button').addEventListener('click', () => analyzeFaces(result.faces));
         }
+        if (result.transcript && result.transcript.trim().length > 0) {
+            document.getElementById('tokenize-button').addEventListener('click', () => tokenizeTranscript(result.transcript));
+        }
+    }
+
+    function populateInitialKeywords(objects) {
+        const finalKeywordsContainer = document.getElementById('final-keywords-container');
+        finalKeywordsContainer.innerHTML = '';
+        objects.forEach(obj => {
+            const tag = document.createElement('span');
+            tag.className = 'keyword-tag';
+            tag.textContent = obj;
+            finalKeywordsContainer.appendChild(tag);
+        });
+    }
+
+    async function tokenizeTranscript(transcriptText) {
+        const tokenizeButton = document.getElementById('tokenize-button');
+        const spinner = document.getElementById('tokenize-spinner');
+        tokenizeButton.classList.add('hidden');
+        spinner.classList.remove('hidden');
+
+        try {
+            const response = await fetch(`${REPHRASER_URL}/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: transcriptText, task: 'rephrase' })
+            });
+
+            if (!response.ok) throw new Error('Rephraser service failed.');
+            
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let resultText = '';
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                const chunk = decoder.decode(value, { stream: true });
+                const lines = chunk.split('\n\n');
+
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const data = line.substring(6);
+                        if (data.trim() === '[END_OF_STREAM]') {
+                            break;
+                        }
+                        resultText += data;
+                    }
+                }
+                 if (lines.some(line => line.includes('[END_OF_STREAM]'))) break;
+            }
+
+            const data = JSON.parse(resultText.trim());
+            if (data.english_tags) {
+                renderSuggestedKeywords(data.english_tags);
+            }
+
+        } catch (error) {
+            alert(`Error tokenizing transcript: ${error.message}`);
+            tokenizeButton.classList.remove('hidden');
+        } finally {
+            spinner.classList.add('hidden');
+        }
+    }
+
+    function renderSuggestedKeywords(keywords) {
+        const suggestedCard = document.getElementById('suggested-keywords-card');
+        const suggestedContainer = document.getElementById('suggested-keywords-container');
+        suggestedContainer.innerHTML = '';
+
+        keywords.forEach(keyword => {
+            const tag = document.createElement('span');
+            tag.className = 'keyword-tag';
+            tag.textContent = keyword;
+
+            const addButton = document.createElement('button');
+            addButton.className = 'add-keyword-btn';
+            addButton.innerHTML = '+';
+            addButton.title = `Add "${keyword}" to final list`;
+            addButton.onclick = () => addKeywordToFinalList(keyword, addButton);
+
+            tag.appendChild(addButton);
+            suggestedContainer.appendChild(tag);
+        });
+
+        suggestedCard.classList.remove('hidden');
+    }
+
+    function addKeywordToFinalList(keyword, button) {
+        const finalKeywordsContainer = document.getElementById('final-keywords-container');
+        const existingKeywords = Array.from(finalKeywordsContainer.children).map(el => el.textContent);
+
+        if (!existingKeywords.includes(keyword)) {
+            const tag = document.createElement('span');
+            tag.className = 'keyword-tag';
+            tag.textContent = keyword;
+            finalKeywordsContainer.appendChild(tag);
+        }
+
+        button.innerHTML = '&#10003;'; // Checkmark
+        button.classList.add('added');
+        button.disabled = true;
     }
     
+    // Unchanged functions from previous steps
     async function analyzeFaces(facesB64) {
         const analyzeButton = document.getElementById('analyze-faces-button');
         const spinner = document.getElementById('face-analysis-spinner');
         analyzeButton.classList.add('hidden');
         spinner.classList.remove('hidden');
-
         try {
-            // *** CHANGE: Send a JSON array of base64 strings instead of a composite image ***
             const response = await fetch(`${FACE_RECOG_URL}/recognize_faces`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ faces: facesB64 }) 
             });
-
             if (!response.ok) throw new Error('Face analysis service failed.');
             const analysisResult = await response.json();
             if (!analysisResult.faces) throw new Error('Invalid response from server.');
-
             analysisResult.faces.forEach(face => {
                 const index = face.index - 1;
                 const controlsContainer = document.getElementById(`face-controls-${index}`);
@@ -213,7 +337,6 @@
                     <button class="save-face-button mt-1 w-full text-xs bg-green-600 hover:bg-green-700 text-white font-semibold py-1 px-2 rounded-md" data-index="${index}">Save</button>
                 `;
             });
-            
             document.querySelectorAll('.save-face-button').forEach(button => {
                 button.addEventListener('click', (e) => {
                     const index = e.target.getAttribute('data-index');
@@ -227,7 +350,6 @@
             spinner.classList.add('hidden');
         }
     }
-
     async function saveFace(index, faceB64) {
         const nameInput = document.getElementById(`face-name-${index}`);
         const personName = nameInput.value.trim();
@@ -240,7 +362,8 @@
         saveButton.disabled = true;
         nameInput.disabled = true;
         try {
-            // Use the /add_person endpoint from your other project
+            const response = await fetch(`data:image/jpeg;base64,${faceB64}`);
+            const blob = await response.blob();
             const addPersonFormData = new FormData();
             addPersonFormData.append('person_name', personName);
             addPersonFormData.append('image_data', faceB64);
@@ -263,16 +386,16 @@
             nameInput.disabled = false;
         }
     }
-    
     function createResultCard(title, content) {
         const icons = {
+            'Final Keywords': '<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>',
             'Visually Detected Objects': `<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" /></svg>`,
             'Unique Faces Detected': `<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" /></svg>`,
-            'Transcription Snippets': `<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>`
+            'Full Transcript': `<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" /></svg>`,
+            'Suggested Keywords from Transcript': `<svg class="w-6 h-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9.568 3H5.25A2.25 2.25 0 003 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 005.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 009.568 3z" /><path stroke-linecap="round" stroke-linejoin="round" d="M6 6h.008v.008H6V6z" /></svg>`
         };
         return `<div class="bg-gray-700/50 p-4 rounded-lg"><div class="flex items-center space-x-3 mb-3 text-gray-400">${icons[title] || ''}<h3 class="text-base font-semibold text-gray-300">${title}</h3></div><div>${content}</div></div>`;
     }
-
     function handleError(message) {
         clearInterval(pollingInterval);
         statusContainer.classList.remove('hidden');
@@ -281,7 +404,6 @@
         statusText.classList.add('text-red-400');
         setControlsDisabled(false);
     }
-
     function setControlsDisabled(disabled) {
         uploadButton.disabled = disabled;
         videoUpload.disabled = disabled;

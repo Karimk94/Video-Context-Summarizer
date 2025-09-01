@@ -83,7 +83,7 @@ def analyze_frames_for_context(frames: list, task_id: str) -> (set, list):
     for i, frame in enumerate(frames):
         try:
             # Use extract_faces to get face images and embeddings
-            embedding_objs = DeepFace.represent(frame, model_name='VGG-Face', detector_backend='opencv', enforce_detection=False)
+            embedding_objs = DeepFace.represent(frame, model_name='VGG-Face', detector_backend='opencv', enforce_detection=True)
             
             for emb_obj in embedding_objs:
                 if 'embedding' not in emb_obj: continue
@@ -114,64 +114,51 @@ def analyze_frames_for_context(frames: list, task_id: str) -> (set, list):
     return detected_objects, unique_faces
 
 
-def transcribe_audio_chunks(video_path: str, language: str, task_id: str) -> list:
-    """Transcribes audio chunks and updates task status with better logging."""
-    tasks[task_id]['status'] = 'Sampling audio for transcription...'
-    transcribed_snippets = []
+def transcribe_full_audio(video_path: str, language: str, task_id: str) -> str:
+    """Extracts and transcribes the full audio track from the video."""
+    tasks[task_id]['status'] = 'Extracting full audio for transcription...'
     try:
         with mp.VideoFileClip(video_path) as video:
-            duration = video.duration
-            sample_interval, chunk_duration = 180, 15
-            num_chunks = int(duration // sample_interval) + 1
-            for i, start_time in enumerate(range(0, int(duration), sample_interval)):
-                tasks[task_id]['status'] = f'Transcribing audio chunk {i+1}/{num_chunks}...'
-                end_time = min(start_time + chunk_duration, duration)
-                temp_audio_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{task_id}_chunk_{i}.mp3")
-                
-                video.subclip(start_time, end_time).audio.write_audiofile(temp_audio_path, codec='mp3', logger=None)
-                
-                # Transcribe the chunk
-                result = WHISPER_MODEL.transcribe(temp_audio_path, language=language)
-                snippet = result['text'].strip()
-                
-                # --- NEW: Add console logging for debugging ---
-                if snippet:
-                    print(f"Task {task_id}: Found speech in chunk {i+1}: '{snippet[:50]}...'")
-                    transcribed_snippets.append(f"[{int(start_time//60)}m {int(start_time%60)}s] {snippet}")
-                else:
-                    print(f"Task {task_id}: No speech detected in chunk {i+1}.")
-                # --- END NEW ---
-                
-                os.remove(temp_audio_path)
+            # Define a path for the full temporary audio file
+            temp_audio_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{task_id}_full_audio.mp3")
+            
+            # Extract the entire audio track
+            video.audio.write_audiofile(temp_audio_path, codec='mp3', logger=None)
+
+        tasks[task_id]['status'] = 'Transcribing full audio (this may take a while)...'
         
-        # --- NEW: Update final status if no speech was found at all ---
-        if not transcribed_snippets:
-             tasks[task_id]['status'] = 'Processing complete. No speech was detected in any audio samples.'
-        # --- END NEW ---
-             
-        return transcribed_snippets
+        # Transcribe the entire audio file at once
+        result = WHISPER_MODEL.transcribe(temp_audio_path, language=language)
+        full_transcript = result['text'].strip()
+
+        # Clean up the temporary audio file
+        os.remove(temp_audio_path)
+        
+        print(f"Task {task_id}: Transcription complete.")
+        return full_transcript
+
     except Exception as e:
-        error_message = f"Audio transcription failed: {e}"
-        print(f"ERROR for task {task_id}: {error_message}") # Print error to console
+        error_message = f"Full audio transcription failed: {e}"
+        print(f"ERROR for task {task_id}: {error_message}")
         tasks[task_id]['error'] = error_message
-        return []
+        return ""
 
 def process_video_task(video_path: str, language: str, task_id: str):
     """The main background task for processing a video."""
     try:
-        # Step 1: Visual Analysis
+        # Step 1: Visual Analysis (This part remains unchanged and is still fast)
         keyframes = extract_keyframes(video_path, task_id)
         detected_objects, unique_faces = analyze_frames_for_context(keyframes, task_id) if keyframes else (set(), [])
         
-        # Step 2: Audio Analysis
-        transcribed_snippets = transcribe_audio_chunks(video_path, language, task_id)
+        # Step 2: Audio Analysis (Calls the new full transcription function)
+        full_transcript = transcribe_full_audio(video_path, language, task_id)
 
         # Step 3: Finalize
         tasks[task_id]['status'] = 'complete'
         tasks[task_id]['result'] = {
             "objects": sorted(list(detected_objects)),
             "faces": unique_faces,
-            "snippets": transcribed_snippets
+            "transcript": full_transcript  # Changed from "snippets" to "transcript"
         }
     except Exception as e:
         tasks[task_id]['status'] = 'error'
@@ -180,7 +167,7 @@ def process_video_task(video_path: str, language: str, task_id: str):
         # Clean up the uploaded video file
         if os.path.exists(video_path):
             os.remove(video_path)
-
+            
 # --- Flask API Endpoints ---
 
 @app.route('/')
