@@ -3,6 +3,7 @@ setuptools
 
 # Web server
 Flask
+flask-cors
 
 # Core functionality
 openai-whisper

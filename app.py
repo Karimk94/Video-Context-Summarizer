@@ -12,12 +12,15 @@ import logging
 import base64
 import io
 from PIL import Image
+from flask_cors import CORS
 
 # --- Basic Setup ---
 app = Flask(__name__)
 # Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
+
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Use a temporary directory for uploads
 UPLOAD_FOLDER = 'uploads'
@@ -112,7 +115,6 @@ def analyze_frames_for_context(frames: list, task_id: str) -> (set, list):
             pass # Skip frame if face analysis fails
             
     return detected_objects, unique_faces
-
 
 def transcribe_full_audio(video_path: str, language: str, task_id: str) -> str:
     """Extracts and transcribes the full audio track from the video."""
