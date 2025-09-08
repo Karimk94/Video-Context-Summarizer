@@ -13,12 +13,17 @@ import base64
 import io
 from PIL import Image
 from flask_cors import CORS
+import requests
+import time
+import re
 
 # --- Basic Setup ---
 app = Flask(__name__)
 # Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 CORS(app, resources={r"/*": {"origins": "*"}})
 
@@ -36,104 +41,166 @@ YOLO_MODEL = YOLO('yolov8n.pt')
 WHISPER_MODEL = whisper.load_model('base')
 print("AI models loaded successfully.")
 
-# --- Core Processing Logic (Adapted from desktop app) ---
+# --- OCR Configuration ---
+OCR_API_URL = os.getenv('OCR_API_URL')
 
-def extract_keyframes(video_path: str, task_id: str):
-    """Extracts keyframes and updates task status."""
-    tasks[task_id]['status'] = 'Extracting keyframes...'
-    keyframes = []
-    try:
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise IOError("Could not open video file.")
-        
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        _, prev_frame = cap.read()
-        if prev_frame is None: return []
-        
-        prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-        frame_count = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret: break
-            frame_count += 1
-            if frame_count % 30 == 0:
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                diff = cv2.absdiff(prev_gray, gray)
-                if np.count_nonzero(diff) > 100000:
-                    keyframes.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                prev_gray = gray
-        cap.release()
-        return keyframes
-    except Exception as e:
-        tasks[task_id]['error'] = f"Keyframe extraction failed: {e}"
-        return []
+# --- Smart Frame Capture Settings ---
+OCR_FRAME_DIFFERENCE_THRESHOLD = 2000000 
+MIN_OCR_INTERVAL_MS = 3000
+MAX_OCR_INTERVAL_MS = 8000 
+KEYFRAME_DIFFERENCE_THRESHOLD = 100000 # For objects/faces
 
-def analyze_frames_for_context(frames: list, task_id: str) -> (set, list):
-    """Analyzes frames for objects and extracts unique faces."""
-    tasks[task_id]['status'] = 'Analyzing keyframes for objects and faces...'
-    detected_objects, known_face_embeddings, unique_faces = set(), [], []
+# --- Core Processing Logic ---
+
+def clean_ocr_text(text: str) -> str:
+    """
+    Cleans the raw OCR output to make it more suitable for downstream NLP tasks.
+    Removes non-ASCII characters and excessive symbols.
+    """
+    # Keep letters, numbers, spaces, and a basic set of punctuation.
+    # This will remove most non-English characters and random symbols.
+    cleaned = re.sub(r'[^a-zA-Z0-9\s.,!?()-:%]', '', text)
+    # Normalize whitespace (e.g., multiple spaces become one)
+    return ' '.join(cleaned.split())
+
+def analyze_video_for_visuals(video_path: str, task_id: str) -> (list, list, list):
+    """
+    Scans a video in a single pass to detect objects, faces, and text from keyframes.
+    """
+    tasks[task_id]['status'] = 'Analyzing video for objects, faces, and text...'
     
-    for i, frame in enumerate(frames):
-        tasks[task_id]['status'] = f'Analyzing keyframe {i+1}/{len(frames)} for objects...'
-        # Object Detection
-        results = YOLO_MODEL(frame, verbose=False)
-        for result in results:
-            for box in result.boxes:
-                detected_objects.add(YOLO_MODEL.names[int(box.cls)])
+    # --- Initialize result containers ---
+    detected_objects = set()
+    known_face_embeddings = []
+    unique_faces = []
+    detected_texts = set()
+    
+    can_perform_ocr = OCR_API_URL is not None
 
-    tasks[task_id]['status'] = 'Detecting and extracting unique faces...'
-    for i, frame in enumerate(frames):
-        try:
-            # Use extract_faces to get face images and embeddings
-            embedding_objs = DeepFace.represent(frame, model_name='VGG-Face', detector_backend='opencv', enforce_detection=True)
-            
-            for emb_obj in embedding_objs:
-                if 'embedding' not in emb_obj: continue
-                embedding = emb_obj['embedding']
-                
-                # Check if the face is unique
-                is_new = all(np.linalg.norm(np.array(known) - np.array(embedding)) > 0.6 for known in known_face_embeddings)
-                
-                if is_new:
-                    known_face_embeddings.append(embedding)
-                    
-                    # Get the face image
-                    facial_area = emb_obj['facial_area']
-                    x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
-                    face_image = frame[y:y+h, x:x+w]
-                    
-                    # Convert to base64
-                    pil_img = Image.fromarray(face_image)
-                    buff = io.BytesIO()
-                    pil_img.save(buff, format="JPEG")
-                    img_str = base64.b64encode(buff.getvalue()).decode("utf-8")
-                    
-                    unique_faces.append(img_str)
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        logging.error(f"Task {task_id}: Could not open video for visual analysis.")
+        return [], [], []
 
-        except Exception:
-            pass # Skip frame if face analysis fails
+    # --- Initialize state trackers for smart capture ---
+    ocr_prev_gray = None
+    keyframe_prev_gray = None
+    last_ocr_time = -MIN_OCR_INTERVAL_MS
+    frame_count = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        frame_count += 1
+        current_time_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+        
+        # --- Process every Nth frame for efficiency ---
+        if frame_count % 15 != 0:
+            continue
+
+        current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        if ocr_prev_gray is None:
+            ocr_prev_gray = current_gray
+            keyframe_prev_gray = current_gray
+
+        # --- 1. OCR Logic ---
+        time_since_last_ocr = current_time_ms - last_ocr_time
+        should_process_for_ocr = False
+        if can_perform_ocr and time_since_last_ocr >= MIN_OCR_INTERVAL_MS:
+            h, w = current_gray.shape
+            ch, cw = 480, int(480 * w / h)
+            resized_ocr_prev = cv2.resize(ocr_prev_gray, (cw, ch))
+            resized_current = cv2.resize(current_gray, (cw, ch))
             
-    return detected_objects, unique_faces
+            diff = cv2.absdiff(resized_ocr_prev, resized_current)
+            non_zero_count = np.count_nonzero(diff)
+
+            is_major_change = non_zero_count > OCR_FRAME_DIFFERENCE_THRESHOLD
+            is_time_for_forced_check = time_since_last_ocr > MAX_OCR_INTERVAL_MS
+            
+            if is_major_change or is_time_for_forced_check:
+                should_process_for_ocr = True
+
+        if should_process_for_ocr:
+            last_ocr_time = current_time_ms
+            ocr_prev_gray = current_gray
+            try:
+                _, buffer = cv2.imencode('.jpg', frame)
+                files = {'file': ('frame.jpg', buffer.tobytes(), 'image/jpeg')}
+                final_ocr_url = f"{OCR_API_URL.rstrip('/')}/ocr"
+                
+                response = requests.post(final_ocr_url, files=files, timeout=15)
+                if response.status_code == 200:
+                    raw_ocr_result = response.json().get('text', '').strip()
+                    cleaned_ocr_result = clean_ocr_text(raw_ocr_result)
+                    
+                    if cleaned_ocr_result and len(cleaned_ocr_result) > 3:
+                        # NEW: Add a validation step to ensure the text is sensible
+                        letters = sum(c.isalpha() for c in cleaned_ocr_result)
+                        digits = sum(c.isdigit() for c in cleaned_ocr_result)
+                        has_multiple_words = ' ' in cleaned_ocr_result.strip()
+
+                        # To be valid, text must have multiple words and more letters than numbers.
+                        if has_multiple_words and letters > digits:
+                            logging.info(f"Task {task_id}: OCR raw: '{raw_ocr_result}' -> Cleaned & Validated: '{cleaned_ocr_result}'")
+                            detected_texts.add(cleaned_ocr_result)
+                        else:
+                            logging.warning(f"Task {task_id}: OCR text '{cleaned_ocr_result}' discarded for being non-prose.")
+
+            except Exception as e:
+                logging.error(f"Task {task_id}: OCR request failed: {e}")
+
+        # --- 2. Object & Face Logic ---
+        diff = cv2.absdiff(keyframe_prev_gray, current_gray)
+        if np.count_nonzero(diff) > KEYFRAME_DIFFERENCE_THRESHOLD:
+            keyframe_prev_gray = current_gray
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            results = YOLO_MODEL(rgb_frame, verbose=False)
+            for result in results:
+                for box in result.boxes:
+                    detected_objects.add(YOLO_MODEL.names[int(box.cls)])
+            
+            try:
+                embedding_objs = DeepFace.represent(rgb_frame, model_name='VGG-Face', detector_backend='opencv', enforce_detection=True)
+                for emb_obj in embedding_objs:
+                    if 'embedding' not in emb_obj: continue
+                    embedding = emb_obj['embedding']
+                    is_new = all(np.linalg.norm(np.array(known) - np.array(embedding)) > 0.6 for known in known_face_embeddings)
+                    if is_new:
+                        known_face_embeddings.append(embedding)
+                        facial_area = emb_obj['facial_area']
+                        x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
+                        face_image = rgb_frame[y:y+h, x:x+w]
+                        pil_img = Image.fromarray(face_image)
+                        buff = io.BytesIO()
+                        pil_img.save(buff, format="JPEG")
+                        img_str = base64.b64encode(buff.getvalue()).decode("utf-8")
+                        unique_faces.append(img_str)
+            except Exception:
+                pass
+
+    cap.release()
+    logging.info(f"Task {task_id}: Visual analysis finished. Found {len(detected_objects)} objects, {len(unique_faces)} faces, {len(detected_texts)} text snippets.")
+    return sorted(list(detected_objects)), unique_faces, sorted(list(detected_texts))
+
 
 def transcribe_full_audio(video_path: str, language: str, task_id: str) -> str:
     """Extracts and transcribes the full audio track from the video."""
     tasks[task_id]['status'] = 'Extracting full audio for transcription...'
     try:
         with mp.VideoFileClip(video_path) as video:
-            # Define a path for the full temporary audio file
             temp_audio_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{task_id}_full_audio.mp3")
-            
-            # Extract the entire audio track
             video.audio.write_audiofile(temp_audio_path, codec='mp3', logger=None)
 
         tasks[task_id]['status'] = 'Transcribing full audio (this may take a while)...'
         
-        # Transcribe the entire audio file at once
         result = WHISPER_MODEL.transcribe(temp_audio_path, language=language)
         full_transcript = result['text'].strip()
 
-        # Clean up the temporary audio file
         os.remove(temp_audio_path)
         
         print(f"Task {task_id}: Transcription complete.")
@@ -145,28 +212,24 @@ def transcribe_full_audio(video_path: str, language: str, task_id: str) -> str:
         tasks[task_id]['error'] = error_message
         return ""
 
+
 def process_video_task(video_path: str, language: str, task_id: str):
     """The main background task for processing a video."""
     try:
-        # Step 1: Visual Analysis (This part remains unchanged and is still fast)
-        keyframes = extract_keyframes(video_path, task_id)
-        detected_objects, unique_faces = analyze_frames_for_context(keyframes, task_id) if keyframes else (set(), [])
-        
-        # Step 2: Audio Analysis (Calls the new full transcription function)
+        detected_objects, unique_faces, ocr_texts = analyze_video_for_visuals(video_path, task_id)
         full_transcript = transcribe_full_audio(video_path, language, task_id)
 
-        # Step 3: Finalize
         tasks[task_id]['status'] = 'complete'
         tasks[task_id]['result'] = {
-            "objects": sorted(list(detected_objects)),
+            "objects": detected_objects,
             "faces": unique_faces,
-            "transcript": full_transcript  # Changed from "snippets" to "transcript"
+            "transcript": full_transcript,
+            "ocr_texts": ocr_texts
         }
     except Exception as e:
         tasks[task_id]['status'] = 'error'
         tasks[task_id]['error'] = str(e)
     finally:
-        # Clean up the uploaded video file
         if os.path.exists(video_path):
             os.remove(video_path)
             

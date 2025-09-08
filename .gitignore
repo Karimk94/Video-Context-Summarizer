@@ -33,3 +33,4 @@ MANIFEST
 *.log
 *.tmp
 *.bak
+.env

@@ -1,5 +1,6 @@
 # Core build tool
 setuptools
+python-dotenv
 
 # Web server
 Flask
