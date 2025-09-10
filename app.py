@@ -14,15 +14,21 @@ import io
 from PIL import Image
 from flask_cors import CORS
 import requests
-import time
 import re
+from typing import List, Tuple
+from werkzeug.serving import run_simple
+from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- Basic Setup ---
 app = Flask(__name__)
 # Suppress TensorFlow warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Set logging level to DEBUG to see detailed frame analysis logs
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -36,10 +42,10 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 tasks = {}
 
 # --- AI Model Loading (Load once on startup) ---
-print("Loading AI models, please wait...")
+logging.info("Loading AI models, please wait...")
 YOLO_MODEL = YOLO('yolov8n.pt')
 WHISPER_MODEL = whisper.load_model('base')
-print("AI models loaded successfully.")
+logging.info("AI models loaded successfully.")
 
 # --- OCR Configuration ---
 OCR_API_URL = os.getenv('OCR_API_URL')
@@ -48,41 +54,30 @@ OCR_API_URL = os.getenv('OCR_API_URL')
 OCR_FRAME_DIFFERENCE_THRESHOLD = 2000000 
 MIN_OCR_INTERVAL_MS = 3000
 MAX_OCR_INTERVAL_MS = 8000 
-KEYFRAME_DIFFERENCE_THRESHOLD = 100000 # For objects/faces
+KEYFRAME_DIFFERENCE_THRESHOLD = 100000
 
 # --- Core Processing Logic ---
 
 def clean_ocr_text(text: str) -> str:
-    """
-    Cleans the raw OCR output to make it more suitable for downstream NLP tasks.
-    Removes non-ASCII characters and excessive symbols.
-    """
-    # Keep letters, numbers, spaces, and a basic set of punctuation.
-    # This will remove most non-English characters and random symbols.
     cleaned = re.sub(r'[^a-zA-Z0-9\s.,!?()-:%]', '', text)
-    # Normalize whitespace (e.g., multiple spaces become one)
     return ' '.join(cleaned.split())
 
-def analyze_video_for_visuals(video_path: str, task_id: str) -> (list, list, list):
-    """
-    Scans a video in a single pass to detect objects, faces, and text from keyframes.
-    """
+def analyze_video_for_visuals(video_path: str, task_id: str) -> Tuple[List, List, List]:
     tasks[task_id]['status'] = 'Analyzing video for objects, faces, and text...'
     
-    # --- Initialize result containers ---
     detected_objects = set()
     known_face_embeddings = []
     unique_faces = []
     detected_texts = set()
     
     can_perform_ocr = OCR_API_URL is not None
+    logging.info(f"Task {task_id}: OCR Service URL is set to '{OCR_API_URL}'. OCR enabled: {can_perform_ocr}")
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         logging.error(f"Task {task_id}: Could not open video for visual analysis.")
         return [], [], []
 
-    # --- Initialize state trackers for smart capture ---
     ocr_prev_gray = None
     keyframe_prev_gray = None
     last_ocr_time = -MIN_OCR_INTERVAL_MS
@@ -96,7 +91,6 @@ def analyze_video_for_visuals(video_path: str, task_id: str) -> (list, list, lis
         frame_count += 1
         current_time_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
         
-        # --- Process every Nth frame for efficiency ---
         if frame_count % 15 != 0:
             continue
 
@@ -106,7 +100,6 @@ def analyze_video_for_visuals(video_path: str, task_id: str) -> (list, list, lis
             ocr_prev_gray = current_gray
             keyframe_prev_gray = current_gray
 
-        # --- 1. OCR Logic ---
         time_since_last_ocr = current_time_ms - last_ocr_time
         should_process_for_ocr = False
         if can_perform_ocr and time_since_last_ocr >= MIN_OCR_INTERVAL_MS:
@@ -121,6 +114,12 @@ def analyze_video_for_visuals(video_path: str, task_id: str) -> (list, list, lis
             is_major_change = non_zero_count > OCR_FRAME_DIFFERENCE_THRESHOLD
             is_time_for_forced_check = time_since_last_ocr > MAX_OCR_INTERVAL_MS
             
+            logging.debug(f"Task {task_id} OCR Check at {current_time_ms:.0f}ms: "
+                          f"Time since last={time_since_last_ocr:.0f}ms (Min={MIN_OCR_INTERVAL_MS}, Max={MAX_OCR_INTERVAL_MS}). "
+                          f"Frame diff={non_zero_count} (Threshold={OCR_FRAME_DIFFERENCE_THRESHOLD}). "
+                          f"Is major change={is_major_change}. "
+                          f"Is time for forced check={is_time_for_forced_check}.")
+
             if is_major_change or is_time_for_forced_check:
                 should_process_for_ocr = True
 
@@ -129,31 +128,33 @@ def analyze_video_for_visuals(video_path: str, task_id: str) -> (list, list, lis
             ocr_prev_gray = current_gray
             try:
                 _, buffer = cv2.imencode('.jpg', frame)
-                files = {'file': ('frame.jpg', buffer.tobytes(), 'image/jpeg')}
-                final_ocr_url = f"{OCR_API_URL.rstrip('/')}/ocr"
                 
-                response = requests.post(final_ocr_url, files=files, timeout=15)
+                final_ocr_url = f"{OCR_API_URL.rstrip('/')}/translate_image_stream"
+                logging.info(f"Task {task_id}: TRIGGER! Sending frame to OCR service at {final_ocr_url}")
+                
+                headers = {'Content-Type': 'application/octet-stream'}
+                response = requests.post(final_ocr_url, data=buffer.tobytes(), headers=headers, timeout=15)
+
                 if response.status_code == 200:
                     raw_ocr_result = response.json().get('text', '').strip()
                     cleaned_ocr_result = clean_ocr_text(raw_ocr_result)
                     
                     if cleaned_ocr_result and len(cleaned_ocr_result) > 3:
-                        # NEW: Add a validation step to ensure the text is sensible
                         letters = sum(c.isalpha() for c in cleaned_ocr_result)
                         digits = sum(c.isdigit() for c in cleaned_ocr_result)
                         has_multiple_words = ' ' in cleaned_ocr_result.strip()
 
-                        # To be valid, text must have multiple words and more letters than numbers.
                         if has_multiple_words and letters > digits:
                             logging.info(f"Task {task_id}: OCR raw: '{raw_ocr_result}' -> Cleaned & Validated: '{cleaned_ocr_result}'")
                             detected_texts.add(cleaned_ocr_result)
                         else:
                             logging.warning(f"Task {task_id}: OCR text '{cleaned_ocr_result}' discarded for being non-prose.")
+                else:
+                    logging.error(f"Task {task_id}: OCR service returned error status {response.status_code}: {response.text}")
 
             except Exception as e:
                 logging.error(f"Task {task_id}: OCR request failed: {e}")
 
-        # --- 2. Object & Face Logic ---
         diff = cv2.absdiff(keyframe_prev_gray, current_gray)
         if np.count_nonzero(diff) > KEYFRAME_DIFFERENCE_THRESHOLD:
             keyframe_prev_gray = current_gray
@@ -189,7 +190,6 @@ def analyze_video_for_visuals(video_path: str, task_id: str) -> (list, list, lis
 
 
 def transcribe_full_audio(video_path: str, language: str, task_id: str) -> str:
-    """Extracts and transcribes the full audio track from the video."""
     tasks[task_id]['status'] = 'Extracting full audio for transcription...'
     try:
         with mp.VideoFileClip(video_path) as video:
@@ -203,18 +203,17 @@ def transcribe_full_audio(video_path: str, language: str, task_id: str) -> str:
 
         os.remove(temp_audio_path)
         
-        print(f"Task {task_id}: Transcription complete.")
+        logging.info(f"Task {task_id}: Transcription complete.")
         return full_transcript
 
     except Exception as e:
         error_message = f"Full audio transcription failed: {e}"
-        print(f"ERROR for task {task_id}: {error_message}")
+        logging.error(f"ERROR for task {task_id}: {error_message}")
         tasks[task_id]['error'] = error_message
         return ""
 
 
 def process_video_task(video_path: str, language: str, task_id: str):
-    """The main background task for processing a video."""
     try:
         detected_objects, unique_faces, ocr_texts = analyze_video_for_visuals(video_path, task_id)
         full_transcript = transcribe_full_audio(video_path, language, task_id)
@@ -229,6 +228,7 @@ def process_video_task(video_path: str, language: str, task_id: str):
     except Exception as e:
         tasks[task_id]['status'] = 'error'
         tasks[task_id]['error'] = str(e)
+        logging.error(f"Task {task_id}: Top-level processing error.", exc_info=True)
     finally:
         if os.path.exists(video_path):
             os.remove(video_path)
@@ -237,13 +237,39 @@ def process_video_task(video_path: str, language: str, task_id: str):
 
 @app.route('/')
 def index():
-    """Serves the main HTML page."""
     with open('index.html', 'r', encoding='utf-8') as f:
         return render_template_string(f.read())
 
+@app.route('/upload_stream', methods=['POST'])
+def upload_stream():
+    language = request.args.get('language', 'english')
+    filename_header = request.headers.get('X-Filename', f"{uuid.uuid4()}.mp4")
+    
+    filename = str(uuid.uuid4()) + os.path.splitext(secure_filename(filename_header))[1]
+    video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    
+    try:
+        with open(video_path, 'wb') as f:
+            chunk_size = 262144 
+            while True:
+                chunk = request.stream.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+    except Exception as e:
+        logging.error(f"Error receiving stream for file {filename}", exc_info=True)
+        return jsonify(error=f"Error receiving stream: {e}"), 500
+
+    task_id = str(uuid.uuid4())
+    tasks[task_id] = {'status': 'queued', 'result': None, 'error': None}
+    
+    thread = Thread(target=process_video_task, args=(video_path, language, task_id))
+    thread.start()
+    
+    return jsonify({"task_id": task_id})
+
 @app.route('/upload', methods=['POST'])
 def upload_video():
-    """Handles video upload and starts the background processing task."""
     if 'video' not in request.files:
         return jsonify({"error": "No video file part"}), 400
     file = request.files['video']
@@ -266,7 +292,6 @@ def upload_video():
 
 @app.route('/status/<task_id>')
 def get_status(task_id):
-    """Allows the frontend to poll for the status of a task."""
     task = tasks.get(task_id)
     if not task:
         return jsonify({"error": "Task not found"}), 404
@@ -279,4 +304,12 @@ def get_status(task_id):
     return jsonify(response)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5008, debug=True)
+    run_simple(
+        '0.0.0.0',
+        5008,
+        app,
+        use_reloader=False,
+        use_debugger=True,
+        threaded=True,
+        exclude_patterns=['*venv*', '*__pycache__*']
+    )
