@@ -16,7 +16,7 @@ from flask_cors import CORS
 import requests
 import re
 from typing import List, Tuple
-from werkzeug.serving import run_simple
+from waitress import serve
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 
@@ -59,7 +59,18 @@ KEYFRAME_DIFFERENCE_THRESHOLD = 100000
 # --- Core Processing Logic ---
 
 def clean_ocr_text(text: str) -> str:
-    cleaned = re.sub(r'[^a-zA-Z0-9\s.,!?()-:%]', '', text)
+    """
+    Cleans raw OCR text by removing characters that are not part of English or Arabic alphabets,
+    numbers, or standard punctuation. This prevents garbled symbols from appearing in the output.
+    """
+    # This regex allows:
+    # a-z, A-Z (English letters)
+    # 0-9 (Numbers)
+    # \u0600-\u06FF (The unicode range for Arabic characters)
+    # \s (Whitespace)
+    # .,!?()-:% (Common punctuation)
+    cleaned = re.sub(r'[^a-zA-Z0-9\u0600-\u06FF\s.,!?()-:%]', '', text)
+    # Consolidate multiple whitespace characters into a single space
     return ' '.join(cleaned.split())
 
 def analyze_video_for_visuals(video_path: str, task_id: str) -> Tuple[List, List, List]:
@@ -304,12 +315,4 @@ def get_status(task_id):
     return jsonify(response)
 
 if __name__ == '__main__':
-    run_simple(
-        '0.0.0.0',
-        5008,
-        app,
-        use_reloader=False,
-        use_debugger=True,
-        threaded=True,
-        exclude_patterns=['*venv*', '*__pycache__*']
-    )
+    serve(app, host='127.0.0.1', port=5008, threads=100)
