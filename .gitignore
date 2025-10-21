@@ -34,3 +34,4 @@ MANIFEST
 *.tmp
 *.bak
 .env
+.DS_Store
