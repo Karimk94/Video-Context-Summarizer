@@ -24,3 +24,4 @@ Pillow
 # torch and torchvision are dependencies for ultralytics (YOLO)
 torch
 torchvision
+waitress
