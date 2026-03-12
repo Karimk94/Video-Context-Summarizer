@@ -1,5 +1,7 @@
 import os
 import uuid
+import time
+import atexit
 from flask import Flask, request, jsonify, render_template_string
 from threading import Thread
 import cv2
@@ -19,6 +21,7 @@ from typing import List, Tuple
 from waitress import serve
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
+import concurrent.futures
 
 load_dotenv()
 
@@ -41,6 +44,32 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 # In-memory "database" to track task status and results
 tasks = {}
 
+# --- Background Task Cleanup ---
+TASK_RETENTION_SECONDS = 3600  # 1 hour
+
+def cleanup_old_tasks():
+    while True:
+        try:
+            current_time = time.time()
+            keys_to_delete = []
+            for task_id, task_data in list(tasks.items()):
+                # Default to current time if created_at is strictly missing, 
+                # so it will eventually be cleaned up in the next hour cycle.
+                created_at = task_data.get('created_at', current_time)
+                if current_time - created_at > TASK_RETENTION_SECONDS:
+                    keys_to_delete.append(task_id)
+            
+            for task_id in keys_to_delete:
+                del tasks[task_id]
+                logging.debug(f"Memory Cleanup: Deleted old task {task_id}")
+        except Exception as e:
+            logging.error(f"Error in cleanup thread: {e}")
+        
+        time.sleep(600)  # Sleep for 10 minutes before checking again
+
+cleanup_thread = Thread(target=cleanup_old_tasks, daemon=True)
+cleanup_thread.start()
+
 # --- AI Model Loading (Load once on startup) ---
 logging.info("Loading AI models, please wait...")
 YOLO_MODEL = YOLO('yolov8n.pt')
@@ -51,10 +80,9 @@ logging.info("AI models loaded successfully.")
 OCR_API_URL = os.getenv('OCR_API_URL')
 
 # --- Smart Frame Capture Settings ---
-OCR_FRAME_DIFFERENCE_THRESHOLD = 2000000 
+HISTOGRAM_CORRELATION_THRESHOLD = 0.85
 MIN_OCR_INTERVAL_MS = 3000
 MAX_OCR_INTERVAL_MS = 8000 
-KEYFRAME_DIFFERENCE_THRESHOLD = 100000
 
 # --- Core Processing Logic ---
 
@@ -89,8 +117,8 @@ def analyze_video_for_visuals(video_path: str, task_id: str) -> Tuple[List, List
         logging.error(f"Task {task_id}: Could not open video for visual analysis.")
         return [], [], []
 
-    ocr_prev_gray = None
-    keyframe_prev_gray = None
+    ocr_prev_hist = None
+    keyframe_prev_hist = None
     last_ocr_time = -MIN_OCR_INTERVAL_MS
     frame_count = 0
 
@@ -106,28 +134,25 @@ def analyze_video_for_visuals(video_path: str, task_id: str) -> Tuple[List, List
             continue
 
         current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        if ocr_prev_gray is None:
-            ocr_prev_gray = current_gray
-            keyframe_prev_gray = current_gray
+        current_hist = cv2.calcHist([current_gray], [0], None, [256], [0, 256])
+        cv2.normalize(current_hist, current_hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+
+        if ocr_prev_hist is None:
+            ocr_prev_hist = current_hist
+            keyframe_prev_hist = current_hist
 
         time_since_last_ocr = current_time_ms - last_ocr_time
         should_process_for_ocr = False
         if can_perform_ocr and time_since_last_ocr >= MIN_OCR_INTERVAL_MS:
-            h, w = current_gray.shape
-            ch, cw = 480, int(480 * w / h)
-            resized_ocr_prev = cv2.resize(ocr_prev_gray, (cw, ch))
-            resized_current = cv2.resize(current_gray, (cw, ch))
-            
-            diff = cv2.absdiff(resized_ocr_prev, resized_current)
-            non_zero_count = np.count_nonzero(diff)
+            # Compare histograms using correlation
+            correlation = cv2.compareHist(ocr_prev_hist, current_hist, cv2.HISTCMP_CORREL)
 
-            is_major_change = non_zero_count > OCR_FRAME_DIFFERENCE_THRESHOLD
+            is_major_change = correlation < HISTOGRAM_CORRELATION_THRESHOLD
             is_time_for_forced_check = time_since_last_ocr > MAX_OCR_INTERVAL_MS
             
             logging.debug(f"Task {task_id} OCR Check at {current_time_ms:.0f}ms: "
                           f"Time since last={time_since_last_ocr:.0f}ms (Min={MIN_OCR_INTERVAL_MS}, Max={MAX_OCR_INTERVAL_MS}). "
-                          f"Frame diff={non_zero_count} (Threshold={OCR_FRAME_DIFFERENCE_THRESHOLD}). "
+                          f"Hist Correlation={correlation:.3f} (Threshold={HISTOGRAM_CORRELATION_THRESHOLD}). "
                           f"Is major change={is_major_change}. "
                           f"Is time for forced check={is_time_for_forced_check}.")
 
@@ -136,7 +161,7 @@ def analyze_video_for_visuals(video_path: str, task_id: str) -> Tuple[List, List
 
         if should_process_for_ocr:
             last_ocr_time = current_time_ms
-            ocr_prev_gray = current_gray
+            ocr_prev_hist = current_hist
             try:
                 _, buffer = cv2.imencode('.jpg', frame)
                 
@@ -166,9 +191,9 @@ def analyze_video_for_visuals(video_path: str, task_id: str) -> Tuple[List, List
             except Exception as e:
                 logging.error(f"Task {task_id}: OCR request failed: {e}")
 
-        diff = cv2.absdiff(keyframe_prev_gray, current_gray)
-        if np.count_nonzero(diff) > KEYFRAME_DIFFERENCE_THRESHOLD:
-            keyframe_prev_gray = current_gray
+        correlation = cv2.compareHist(keyframe_prev_hist, current_hist, cv2.HISTCMP_CORREL)
+        if correlation < HISTOGRAM_CORRELATION_THRESHOLD:
+            keyframe_prev_hist = current_hist
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
             results = YOLO_MODEL(rgb_frame, verbose=False)
@@ -201,33 +226,35 @@ def analyze_video_for_visuals(video_path: str, task_id: str) -> Tuple[List, List
 
 
 def transcribe_full_audio(video_path: str, language: str, task_id: str) -> str:
-    tasks[task_id]['status'] = 'Extracting full audio for transcription...'
+    tasks[task_id]['status'] = 'Extracting audio and transcribing (this may take a while)...'
     try:
-        with mp.VideoFileClip(video_path) as video:
-            temp_audio_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{task_id}_full_audio.mp3")
-            video.audio.write_audiofile(temp_audio_path, codec='mp3', logger=None)
-
-        tasks[task_id]['status'] = 'Transcribing full audio (this may take a while)...'
-        
-        result = WHISPER_MODEL.transcribe(temp_audio_path, language=language)
+        # Whisper natively uses ffmpeg to extract audio from video files, 
+        # bypassing the need for moviepy which can fail on files without audio.
+        result = WHISPER_MODEL.transcribe(video_path, language=language)
         full_transcript = result['text'].strip()
-
-        os.remove(temp_audio_path)
         
         logging.info(f"Task {task_id}: Transcription complete.")
         return full_transcript
 
     except Exception as e:
         error_message = f"Full audio transcription failed: {e}"
-        logging.error(f"ERROR for task {task_id}: {error_message}")
-        tasks[task_id]['error'] = error_message
+        logging.error(f"ERROR for task {task_id}: {error_message}", exc_info=True)
+        # Continuing despite error just in case; returning empty string
         return ""
 
 
 def process_video_task(video_path: str, language: str, task_id: str):
     try:
-        detected_objects, unique_faces, ocr_texts = analyze_video_for_visuals(video_path, task_id)
-        full_transcript = transcribe_full_audio(video_path, language, task_id)
+        tasks[task_id]['status'] = 'Analyzing video... (parallel audio and visual tasks)'
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            # Submit both tasks concurrently
+            visual_future = executor.submit(analyze_video_for_visuals, video_path, task_id)
+            audio_future = executor.submit(transcribe_full_audio, video_path, language, task_id)
+            
+            # Wait for both tasks to complete and retrieve their results
+            detected_objects, unique_faces, ocr_texts = visual_future.result()
+            full_transcript = audio_future.result()
 
         tasks[task_id]['status'] = 'complete'
         tasks[task_id]['result'] = {
@@ -241,8 +268,18 @@ def process_video_task(video_path: str, language: str, task_id: str):
         tasks[task_id]['error'] = str(e)
         logging.error(f"Task {task_id}: Top-level processing error.", exc_info=True)
     finally:
-        if os.path.exists(video_path):
-            os.remove(video_path)
+        # On Windows, sometimes the OS or Whisper model holds onto the file lock
+        # for a fraction of a second after the concurrent thread finishes.
+        max_retries = 5
+        for _ in range(max_retries):
+            if os.path.exists(video_path):
+                try:
+                    os.remove(video_path)
+                    break
+                except PermissionError:
+                    time.sleep(1)
+            else:
+                break
             
 # --- Flask API Endpoints ---
 
@@ -272,7 +309,7 @@ def upload_stream():
         return jsonify(error=f"Error receiving stream: {e}"), 500
 
     task_id = str(uuid.uuid4())
-    tasks[task_id] = {'status': 'queued', 'result': None, 'error': None}
+    tasks[task_id] = {'status': 'queued', 'result': None, 'error': None, 'created_at': time.time()}
     
     thread = Thread(target=process_video_task, args=(video_path, language, task_id))
     thread.start()
@@ -294,7 +331,7 @@ def upload_video():
         file.save(video_path)
         
         task_id = str(uuid.uuid4())
-        tasks[task_id] = {'status': 'queued', 'result': None, 'error': None}
+        tasks[task_id] = {'status': 'queued', 'result': None, 'error': None, 'created_at': time.time()}
         
         thread = Thread(target=process_video_task, args=(video_path, language, task_id))
         thread.start()
