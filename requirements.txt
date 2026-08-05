@@ -3,25 +3,16 @@ setuptools
 python-dotenv
 
 # Web server
-Flask
-flask-cors
+fastapi
+uvicorn
+python-multipart
 
-# Core functionality
-openai-whisper
+# HTTP Requests
+requests
 
-# For visual analysis (Strategic Sampling)
+# Used for video frame and audio extraction
 opencv-python-headless
-ultralytics
-deepface
-tf-keras
-
-# Pinned moviepy for compatibility, other versions are flexible
 moviepy==1.0.3
 numpy
 imageio
 Pillow
-
-# torch and torchvision are dependencies for ultralytics (YOLO)
-torch
-torchvision
-waitress

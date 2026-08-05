@@ -1,355 +1,253 @@
 import os
 import uuid
 import time
-import atexit
-from flask import Flask, request, jsonify, render_template_string
-from threading import Thread
-import cv2
-import whisper
-import moviepy.editor as mp
-from ultralytics import YOLO
-from deepface import DeepFace
-import numpy as np
-import logging
 import base64
-import io
-from PIL import Image
-from flask_cors import CORS
+import cv2
 import requests
-import re
-from typing import List, Tuple
-from waitress import serve
-from werkzeug.utils import secure_filename
-from dotenv import load_dotenv
+import logging
 import concurrent.futures
+from fastapi import FastAPI, Request, UploadFile, File, Form, BackgroundTasks
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import moviepy.editor as mp
+from dotenv import load_dotenv
+import uvicorn
+import shutil
 
 load_dotenv()
 
-# --- Basic Setup ---
-app = Flask(__name__)
-# Suppress TensorFlow warnings
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-logging.getLogger('tensorflow').setLevel(logging.ERROR)
-# Set logging level to DEBUG to see detailed frame analysis logs
+app = FastAPI(title="Video Context Summarizer")
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
-CORS(app, resources={r"/*": {"origins": "*"}})
-
-# Use a temporary directory for uploads
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# In-memory "database" to track task status and results
+# Configuration
+OCR_API_URL = os.getenv('OCR_API_URL')
+GOVAI_API_URL = os.getenv('GOVAI_API_URL')
+GOVAI_API_KEY = os.getenv('GOVAI_API_KEY')
+GOVAI_VISION_MODEL = os.getenv('GOVAI_VISION_MODEL', 'qwen3-vl-30b')
+GOVAI_AUDIO_MODEL = os.getenv('GOVAI_AUDIO_MODEL', 'whisper_asr')
+
 tasks = {}
 
-# --- Background Task Cleanup ---
-TASK_RETENTION_SECONDS = 3600  # 1 hour
-
+# Background cleanup
 def cleanup_old_tasks():
-    while True:
-        try:
-            current_time = time.time()
-            keys_to_delete = []
-            for task_id, task_data in list(tasks.items()):
-                # Default to current time if created_at is strictly missing, 
-                # so it will eventually be cleaned up in the next hour cycle.
-                created_at = task_data.get('created_at', current_time)
-                if current_time - created_at > TASK_RETENTION_SECONDS:
-                    keys_to_delete.append(task_id)
-            
-            for task_id in keys_to_delete:
-                del tasks[task_id]
-                logging.debug(f"Memory Cleanup: Deleted old task {task_id}")
-        except Exception as e:
-            logging.error(f"Error in cleanup thread: {e}")
-        
-        time.sleep(600)  # Sleep for 10 minutes before checking again
+    current_time = time.time()
+    keys_to_delete = [
+        task_id for task_id, task_data in tasks.items()
+        if current_time - task_data.get('created_at', current_time) > 3600
+    ]
+    for task_id in keys_to_delete:
+        del tasks[task_id]
 
-cleanup_thread = Thread(target=cleanup_old_tasks, daemon=True)
-cleanup_thread.start()
-
-# --- AI Model Loading (Load once on startup) ---
-logging.info("Loading AI models, please wait...")
-YOLO_MODEL = YOLO('yolov8n.pt')
-WHISPER_MODEL = whisper.load_model('base')
-logging.info("AI models loaded successfully.")
-
-# --- OCR Configuration ---
-OCR_API_URL = os.getenv('OCR_API_URL')
-
-# --- Smart Frame Capture Settings ---
-HISTOGRAM_CORRELATION_THRESHOLD = 0.85
-MIN_OCR_INTERVAL_MS = 3000
-MAX_OCR_INTERVAL_MS = 8000 
-
-# --- Core Processing Logic ---
-
-def clean_ocr_text(text: str) -> str:
-    """
-    Cleans raw OCR text by removing characters that are not part of English or Arabic alphabets,
-    numbers, or standard punctuation. This prevents garbled symbols from appearing in the output.
-    """
-    # This regex allows:
-    # a-z, A-Z (English letters)
-    # 0-9 (Numbers)
-    # \u0600-\u06FF (The unicode range for Arabic characters)
-    # \s (Whitespace)
-    # .,!?()-:% (Common punctuation)
-    cleaned = re.sub(r'[^a-zA-Z0-9\u0600-\u06FF\s.,!?()-:%]', '', text)
-    # Consolidate multiple whitespace characters into a single space
-    return ' '.join(cleaned.split())
-
-def analyze_video_for_visuals(video_path: str, task_id: str) -> Tuple[List, List, List]:
-    tasks[task_id]['status'] = 'Analyzing video for objects, faces, and text...'
-    
-    detected_objects = set()
-    known_face_embeddings = []
-    unique_faces = []
-    detected_texts = set()
-    
-    can_perform_ocr = OCR_API_URL is not None
-    logging.info(f"Task {task_id}: OCR Service URL is set to '{OCR_API_URL}'. OCR enabled: {can_perform_ocr}")
-
+def extract_keyframes(video_path, max_frames=5):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        logging.error(f"Task {task_id}: Could not open video for visual analysis.")
-        return [], [], []
-
-    ocr_prev_hist = None
-    keyframe_prev_hist = None
-    last_ocr_time = -MIN_OCR_INTERVAL_MS
-    frame_count = 0
-
-    while True:
+        return []
+    
+    frames = []
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    if total_frames == 0 or fps == 0:
+        return []
+        
+    duration = total_frames / fps
+    interval = max(1.0, duration / max_frames)
+    
+    for i in range(max_frames):
+        target_time = i * interval
+        cap.set(cv2.CAP_PROP_POS_MSEC, target_time * 1000)
         ret, frame = cap.read()
-        if not ret:
-            break
-        
-        frame_count += 1
-        current_time_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
-        
-        if frame_count % 15 != 0:
-            continue
-
-        current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        current_hist = cv2.calcHist([current_gray], [0], None, [256], [0, 256])
-        cv2.normalize(current_hist, current_hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
-
-        if ocr_prev_hist is None:
-            ocr_prev_hist = current_hist
-            keyframe_prev_hist = current_hist
-
-        time_since_last_ocr = current_time_ms - last_ocr_time
-        should_process_for_ocr = False
-        if can_perform_ocr and time_since_last_ocr >= MIN_OCR_INTERVAL_MS:
-            # Compare histograms using correlation
-            correlation = cv2.compareHist(ocr_prev_hist, current_hist, cv2.HISTCMP_CORREL)
-
-            is_major_change = correlation < HISTOGRAM_CORRELATION_THRESHOLD
-            is_time_for_forced_check = time_since_last_ocr > MAX_OCR_INTERVAL_MS
+        if ret:
+            # Encode frame to JPEG base64
+            _, buffer = cv2.imencode('.jpg', frame)
+            b64 = base64.b64encode(buffer).decode('utf-8')
+            frames.append(b64)
             
-            logging.debug(f"Task {task_id} OCR Check at {current_time_ms:.0f}ms: "
-                          f"Time since last={time_since_last_ocr:.0f}ms (Min={MIN_OCR_INTERVAL_MS}, Max={MAX_OCR_INTERVAL_MS}). "
-                          f"Hist Correlation={correlation:.3f} (Threshold={HISTOGRAM_CORRELATION_THRESHOLD}). "
-                          f"Is major change={is_major_change}. "
-                          f"Is time for forced check={is_time_for_forced_check}.")
+    cap.release()
+    return frames
 
-            if is_major_change or is_time_for_forced_check:
-                should_process_for_ocr = True
-
-        if should_process_for_ocr:
-            last_ocr_time = current_time_ms
-            ocr_prev_hist = current_hist
-            try:
-                _, buffer = cv2.imencode('.jpg', frame)
-                
-                final_ocr_url = f"{OCR_API_URL.rstrip('/')}/translate_image_stream"
-                logging.info(f"Task {task_id}: TRIGGER! Sending frame to OCR service at {final_ocr_url}")
-                
-                headers = {'Content-Type': 'application/octet-stream'}
-                response = requests.post(final_ocr_url, data=buffer.tobytes(), headers=headers, timeout=15)
-
-                if response.status_code == 200:
-                    raw_ocr_result = response.json().get('text', '').strip()
-                    cleaned_ocr_result = clean_ocr_text(raw_ocr_result)
-                    
-                    if cleaned_ocr_result and len(cleaned_ocr_result) > 3:
-                        letters = sum(c.isalpha() for c in cleaned_ocr_result)
-                        digits = sum(c.isdigit() for c in cleaned_ocr_result)
-                        has_multiple_words = ' ' in cleaned_ocr_result.strip()
-
-                        if has_multiple_words and letters > digits:
-                            logging.info(f"Task {task_id}: OCR raw: '{raw_ocr_result}' -> Cleaned & Validated: '{cleaned_ocr_result}'")
-                            detected_texts.add(cleaned_ocr_result)
-                        else:
-                            logging.warning(f"Task {task_id}: OCR text '{cleaned_ocr_result}' discarded for being non-prose.")
-                else:
-                    logging.error(f"Task {task_id}: OCR service returned error status {response.status_code}: {response.text}")
-
-            except Exception as e:
-                logging.error(f"Task {task_id}: OCR request failed: {e}")
-
-        correlation = cv2.compareHist(keyframe_prev_hist, current_hist, cv2.HISTCMP_CORREL)
-        if correlation < HISTOGRAM_CORRELATION_THRESHOLD:
-            keyframe_prev_hist = current_hist
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            results = YOLO_MODEL(rgb_frame, verbose=False)
-            for result in results:
-                for box in result.boxes:
-                    detected_objects.add(YOLO_MODEL.names[int(box.cls)])
+def analyze_video_for_visuals(video_path: str, task_id: str):
+    tasks[task_id]['status'] = 'Analyzing video frames with GovAI...'
+    try:
+        keyframes = extract_keyframes(video_path, max_frames=5)
+        if not keyframes:
+            return "No frames extracted."
             
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Please analyze these keyframes from a video. Describe the objects, faces, and any context you see."}
+                ]
+            }
+        ]
+        
+        for b64 in keyframes:
+            messages[0]["content"].append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+            })
+            
+        payload = {
+            "model": GOVAI_VISION_MODEL,
+            "messages": messages,
+            "max_tokens": 1000
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {GOVAI_API_KEY}"
+        }
+        
+        response = requests.post(GOVAI_API_URL, headers=headers, json=payload, timeout=120)
+        response.raise_for_status()
+        
+        result_json = response.json()
+        return result_json['choices'][0]['message']['content']
+        
+    except Exception as e:
+        logging.error(f"Visual analysis failed: {e}")
+        return f"Error: {str(e)}"
+
+def transcribe_full_audio(video_path: str, task_id: str):
+    tasks[task_id]['status'] = 'Extracting audio and transcribing...'
+    audio_path = f"{video_path}.mp3"
+    try:
+        # Extract audio
+        video = mp.VideoFileClip(video_path)
+        if video.audio is None:
+            return "No audio track found in video."
+            
+        video.audio.write_audiofile(audio_path, logger=None)
+        video.close()
+        
+        # Send to GovAI API
+        headers = {
+            "Authorization": f"Bearer {GOVAI_API_KEY}"
+        }
+        
+        # We try to send it as a multipart form data request which is standard for whisper APIs.
+        with open(audio_path, 'rb') as f:
+            files = {"file": (os.path.basename(audio_path), f, "audio/mpeg")}
+            data = {"model": GOVAI_AUDIO_MODEL}
+            response = requests.post(GOVAI_API_URL, headers=headers, data=data, files=files, timeout=300)
+            
+        if response.status_code == 200:
+            result_json = response.json()
+            # If standard OpenAI format, transcript is in 'text'
+            return result_json.get('text', str(result_json))
+        else:
+            return f"Audio API Error: {response.status_code} - {response.text}"
+            
+    except Exception as e:
+        logging.error(f"Audio transcription failed: {e}")
+        return f"Error: {str(e)}"
+    finally:
+        if os.path.exists(audio_path):
             try:
-                embedding_objs = DeepFace.represent(rgb_frame, model_name='VGG-Face', detector_backend='opencv', enforce_detection=True)
-                for emb_obj in embedding_objs:
-                    if 'embedding' not in emb_obj: continue
-                    embedding = emb_obj['embedding']
-                    is_new = all(np.linalg.norm(np.array(known) - np.array(embedding)) > 0.6 for known in known_face_embeddings)
-                    if is_new:
-                        known_face_embeddings.append(embedding)
-                        facial_area = emb_obj['facial_area']
-                        x, y, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
-                        face_image = rgb_frame[y:y+h, x:x+w]
-                        pil_img = Image.fromarray(face_image)
-                        buff = io.BytesIO()
-                        pil_img.save(buff, format="JPEG")
-                        img_str = base64.b64encode(buff.getvalue()).decode("utf-8")
-                        unique_faces.append(img_str)
-            except Exception:
+                os.remove(audio_path)
+            except:
                 pass
 
-    cap.release()
-    logging.info(f"Task {task_id}: Visual analysis finished. Found {len(detected_objects)} objects, {len(unique_faces)} faces, {len(detected_texts)} text snippets.")
-    return sorted(list(detected_objects)), unique_faces, sorted(list(detected_texts))
-
-
-def transcribe_full_audio(video_path: str, language: str, task_id: str) -> str:
-    tasks[task_id]['status'] = 'Extracting audio and transcribing (this may take a while)...'
+def process_video_task(video_path: str, task_id: str):
     try:
-        # Whisper natively uses ffmpeg to extract audio from video files, 
-        # bypassing the need for moviepy which can fail on files without audio.
-        result = WHISPER_MODEL.transcribe(video_path, language=language)
-        full_transcript = result['text'].strip()
-        
-        logging.info(f"Task {task_id}: Transcription complete.")
-        return full_transcript
-
-    except Exception as e:
-        error_message = f"Full audio transcription failed: {e}"
-        logging.error(f"ERROR for task {task_id}: {error_message}", exc_info=True)
-        # Continuing despite error just in case; returning empty string
-        return ""
-
-
-def process_video_task(video_path: str, language: str, task_id: str):
-    try:
-        tasks[task_id]['status'] = 'Analyzing video... (parallel audio and visual tasks)'
+        tasks[task_id]['status'] = 'Processing with GovAI models...'
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            # Submit both tasks concurrently
             visual_future = executor.submit(analyze_video_for_visuals, video_path, task_id)
-            audio_future = executor.submit(transcribe_full_audio, video_path, language, task_id)
+            audio_future = executor.submit(transcribe_full_audio, video_path, task_id)
             
-            # Wait for both tasks to complete and retrieve their results
-            detected_objects, unique_faces, ocr_texts = visual_future.result()
-            full_transcript = audio_future.result()
-
+            visual_result = visual_future.result()
+            audio_result = audio_future.result()
+            
         tasks[task_id]['status'] = 'complete'
         tasks[task_id]['result'] = {
-            "objects": detected_objects,
-            "faces": unique_faces,
-            "transcript": full_transcript,
-            "ocr_texts": ocr_texts
+            "visual_analysis": visual_result,
+            "audio_transcript": audio_result
         }
     except Exception as e:
         tasks[task_id]['status'] = 'error'
         tasks[task_id]['error'] = str(e)
-        logging.error(f"Task {task_id}: Top-level processing error.", exc_info=True)
     finally:
-        # On Windows, sometimes the OS or Whisper model holds onto the file lock
-        # for a fraction of a second after the concurrent thread finishes.
-        max_retries = 5
-        for _ in range(max_retries):
-            if os.path.exists(video_path):
-                try:
-                    os.remove(video_path)
-                    break
-                except PermissionError:
-                    time.sleep(1)
-            else:
-                break
-            
-# --- Flask API Endpoints ---
+        if os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except:
+                pass
 
-@app.route('/')
-def index():
+@app.get("/", response_class=HTMLResponse)
+async def index():
     with open('index.html', 'r', encoding='utf-8') as f:
-        return render_template_string(f.read())
+        return HTMLResponse(content=f.read())
 
-@app.route('/upload_stream', methods=['POST'])
-def upload_stream():
-    language = request.args.get('language', 'english')
-    filename_header = request.headers.get('X-Filename', f"{uuid.uuid4()}.mp4")
+@app.post("/upload_stream")
+async def upload_stream(request: Request, background_tasks: BackgroundTasks, language: str = 'english'):
+    cleanup_old_tasks()
     
-    filename = str(uuid.uuid4()) + os.path.splitext(secure_filename(filename_header))[1]
-    video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    filename_header = request.headers.get('X-Filename', f"{uuid.uuid4()}.mp4")
+    filename = f"{uuid.uuid4()}_{filename_header}"
+    video_path = os.path.join(UPLOAD_FOLDER, filename)
     
     try:
         with open(video_path, 'wb') as f:
-            chunk_size = 262144 
-            while True:
-                chunk = request.stream.read(chunk_size)
-                if not chunk:
-                    break
+            async for chunk in request.stream():
                 f.write(chunk)
     except Exception as e:
-        logging.error(f"Error receiving stream for file {filename}", exc_info=True)
-        return jsonify(error=f"Error receiving stream: {e}"), 500
-
+        return JSONResponse(status_code=500, content={"error": f"Error receiving stream: {e}"})
+        
     task_id = str(uuid.uuid4())
     tasks[task_id] = {'status': 'queued', 'result': None, 'error': None, 'created_at': time.time()}
     
-    thread = Thread(target=process_video_task, args=(video_path, language, task_id))
-    thread.start()
-    
-    return jsonify({"task_id": task_id})
+    background_tasks.add_task(process_video_task, video_path, task_id)
+    return {"task_id": task_id}
 
-@app.route('/upload', methods=['POST'])
-def upload_video():
-    if 'video' not in request.files:
-        return jsonify({"error": "No video file part"}), 400
-    file = request.files['video']
-    language = request.form.get('language', 'english')
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
+@app.post("/upload")
+async def upload_video(background_tasks: BackgroundTasks, video: UploadFile = File(...), language: str = Form('english')):
+    cleanup_old_tasks()
     
-    if file:
-        filename = str(uuid.uuid4()) + os.path.splitext(file.filename)[1]
-        video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(video_path)
+    filename = f"{uuid.uuid4()}_{video.filename}"
+    video_path = os.path.join(UPLOAD_FOLDER, filename)
+    
+    try:
+        with open(video_path, "wb") as buffer:
+            shutil.copyfileobj(video.file, buffer)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Error saving file: {e}"})
         
-        task_id = str(uuid.uuid4())
-        tasks[task_id] = {'status': 'queued', 'result': None, 'error': None, 'created_at': time.time()}
-        
-        thread = Thread(target=process_video_task, args=(video_path, language, task_id))
-        thread.start()
-        
-        return jsonify({"task_id": task_id})
+    task_id = str(uuid.uuid4())
+    tasks[task_id] = {'status': 'queued', 'result': None, 'error': None, 'created_at': time.time()}
+    
+    background_tasks.add_task(process_video_task, video_path, task_id)
+    return {"task_id": task_id}
 
-@app.route('/status/<task_id>')
-def get_status(task_id):
+@app.get("/status/{task_id}")
+async def get_status(task_id: str):
     task = tasks.get(task_id)
     if not task:
-        return jsonify({"error": "Task not found"}), 404
-    
-    response = {
+        return JSONResponse(status_code=404, content={"error": "Task not found"})
+        
+    return {
         "status": task['status'],
         "result": task['result'],
         "error": task['error']
     }
-    return jsonify(response)
 
 if __name__ == '__main__':
-    serve(app, host='0.0.0.0', port=5008, threads=100)
+    port = int(os.environ.get("HTTP_PLATFORM_PORT", 5008))
+    print(f"Starting API on port {port}...")
+    uvicorn.run(app, host="0.0.0.0", port=port)

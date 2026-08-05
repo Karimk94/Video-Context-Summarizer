@@ -35,3 +35,5 @@ MANIFEST
 *.bak
 .env
 .DS_Store
+packages
+graphify-out/
